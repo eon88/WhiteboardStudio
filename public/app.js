@@ -198,3 +198,149 @@ function drawAt(position, showMarker=true){
  // Very subtle transition wash between scenes.
  if(t<.17){ctx.fillStyle=`rgba(253,252,248,${(1-t/.17)*.75})`;ctx.fillRect(33,33,1214,654);}
 }
+function renderScenes(){
+ const box=$('sceneStrip'); if(!state.scenes.length){box.innerHTML='<div class="empty-scenes">Your scenes will appear here after you paste an essay and create your storyboard. <span>↗</span></div>';$('editorPanel').classList.add('hidden');$('sceneCount').textContent='0 scenes';return;}
+ $('sceneCount').textContent=state.scenes.length+' scene'+(state.scenes.length===1?'':'s');
+ box.innerHTML=state.scenes.map((s,i)=>`<button type="button" class="scene-tile${i===state.selected?' selected':''}" data-scene="${i}" aria-label="Edit scene ${i+1}: ${h(s.title)}"><div class="scene-art">${iconSVG(s.icon)}</div><div class="scene-text"><div class="scene-meta"><span>SCENE ${String(i+1).padStart(2,'0')}</span><span>${Math.round(currentTimings()[i]||0)}s</span></div><div class="scene-name">${h(s.title)}</div></div></button>`).join('');
+ box.querySelectorAll('[data-scene]').forEach(b=>b.addEventListener('click',()=>selectScene(Number(b.dataset.scene))));
+ fillEditor();
+}
+function selectScene(i){if(!state.scenes.length)return;stopPlayback();state.selected=clamp(i,0,state.scenes.length-1);setPosition(timeForScene(state.selected)+Math.min(7,currentTimings()[state.selected]*.6));renderScenes();}
+function fillEditor(){const s=state.scenes[state.selected];if(!s){$('editorPanel').classList.add('hidden');return;}
+ $('editorPanel').classList.remove('hidden');$('editingNumber').textContent=String(state.selected+1).padStart(2,'0');
+ $('sceneTitleInput').value=s.title;$('sceneCaptionInput').value=s.caption;$('iconSelect').value=s.icon;$('durationInput').value=s.duration;$('sceneBodyInput').value=s.body;
+ $('moveLeftBtn').disabled=state.selected===0;$('moveRightBtn').disabled=state.selected===state.scenes.length-1;
+}
+function scheduleSave(){clearTimeout(saveTimer);saveTimer=setTimeout(()=>{try{localStorage.setItem('whiteboard-studio-draft',JSON.stringify({essay:$('essay').value,scenes:state.scenes,selected:state.selected}));}catch{}},600);}
+function updateDraft(){state.essay=$('essay').value;$('wordCount').textContent=wordCount(state.essay)+' words';scheduleSave();}
+function redrawAndSave(){drawAt(state.position);scheduleSave();}
+function updateAudioControls(){if(state.audioUrl){$('audioStatus').textContent=`Narration attached · ${formatted(state.audioDuration)}. Scene timings follow the voiceover.`;$('removeAudioBtn').classList.remove('hidden');}else{$('audioStatus').textContent='No audio attached. The video will be silent.';$('removeAudioBtn').classList.add('hidden');}renderScenes();updatePlayerUI();}
+async function setAudio(blob){if(state.audioUrl)URL.revokeObjectURL(state.audioUrl);if(state.audioPreview){state.audioPreview.pause();state.audioPreview=null;}
+ const url=URL.createObjectURL(blob);const a=new Audio(url);a.preload='metadata';
+ const duration=await new Promise((resolve,reject)=>{a.onloadedmetadata=()=>resolve(a.duration);a.onerror=()=>reject(new Error('Unsupported audio file'));setTimeout(()=>reject(new Error('Timed out reading audio')),15000);});
+ if(!Number.isFinite(duration)||duration<=0){URL.revokeObjectURL(url);throw new Error('Invalid audio duration.');}
+ state.audioBlob=blob;state.audioUrl=url;state.audioPreview=a;state.audioDuration=duration;stopPlayback();setPosition(0);updateAudioControls();
+}
+function removeAudio(){stopPlayback();if(state.audioUrl)URL.revokeObjectURL(state.audioUrl);state.audioUrl=null;state.audioPreview=null;state.audioDuration=null;state.audioBlob=null;setPosition(0);updateAudioControls();}
+function download(blob,filename){const url=URL.createObjectURL(blob);const a=document.createElement('a');a.href=url;a.download=filename;document.body.appendChild(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(url),10000);}
+function lockUI(busy){state.busy=busy;for(const id of ['generateBtn','mp4Btn','webmBtn','makeVoiceBtn','aiBtn','instantBtn'])$(id).disabled=busy;}
+async function findModels(){
+ try{const r=await fetch('/api/ollama-models');const x=await r.json();const el=$('modelSelect');el.innerHTML='';if(!x.models.length){el.innerHTML='<option value="">Ollama is not running</option>';toast('No local Ollama models found. Use Instant scenes instead.');return;}
+ x.models.forEach(model=>{const o=document.createElement('option');o.textContent=model;o.value=model;el.appendChild(o);});toast(x.models.length+' Ollama model'+(x.models.length===1?'':'s')+' available.');
+ }catch(e){toast('Could not connect to Ollama: '+e.message,true);}
+}
+async function createScenes(){const essay=$('essay').value.trim();if(wordCount(essay)<5)return toast('Paste at least a few sentences to begin.',true);
+ if(essay.length>45000)return toast('This first version supports essays up to 45,000 characters.',true);
+ stopPlayback();lockUI(true);$('generateBtn').textContent='Generating storyboard…';
+ try{
+   let scenes;
+   if(state.mode==='ai'){
+     const model=$('modelSelect').value;if(!model)throw new Error('Choose an Ollama model first or switch to Instant scenes.');
+     const resp=await fetch('/api/ollama-plan',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({text:essay,model,sceneCount:Math.ceil(wordCount(essay)/42)})});
+     const result=await resp.json();if(!resp.ok)throw new Error(result.error||'Ollama planning failed');scenes=result.scenes;
+   }else scenes=instantScenes(essay);
+   if(!scenes.length)throw new Error('No scenes were generated');
+   state.scenes=scenes.map(normalizedScene);state.selected=0;setPosition(Math.min(currentTimings()[0]*.6,7));renderScenes();scheduleSave();
+   toast(`Created ${state.scenes.length} scenes. Choose one to edit, or press Play.`);
+   $('storyboardSection').scrollIntoView({behavior:'smooth',block:'start'});
+ }catch(e){toast(e.message,true);}finally{lockUI(false);$('generateBtn').innerHTML='<span>✳</span> Create my storyboard <span class="btn-arrow">→</span>';}
+}
+async function generateVoice(){if(state.busy)return;const essay=$('essay').value.trim();if(!essay)return toast('Paste your essay first.',true);
+ if(!state.windowsTTS)return toast('Windows speech synthesis is unavailable here. Import a narration file instead.',true);
+ lockUI(true);$('audioStatus').textContent='Generating narration locally on Windows…';
+ try {const r=await fetch('/api/tts',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({text:essay,rate:Number($('voiceRate').value)})});
+   if(!r.ok){const x=await r.json();throw new Error(x.error||'Voice generation failed');}
+   await setAudio(await r.blob());toast('Offline narration is ready.');
+ }catch(e){$('audioStatus').textContent='Could not generate narration. Import an audio file instead.';toast(e.message,true);}finally{lockUI(false);}
+}
+function setExportProgress(p,text){$('exportProgress').classList.remove('hidden');$('progressBar').style.width=Math.round(p*100)+'%';$('progressText').textContent=text;}
+async function exportVideo(format){
+ if(state.exporting||state.busy)return;
+ if(!state.scenes.length)return toast('Create your storyboard first.',true);
+ if(format==='mp4'&&!state.ffmpeg)return toast('MP4 needs FFmpeg. Install FFmpeg and restart, or export WebM now.',true);
+ if(!canvas.captureStream||!window.MediaRecorder)return toast('Video recording needs Chrome or Edge.',true);
+ const mime=['video/webm;codecs=vp9,opus','video/webm;codecs=vp8,opus','video/webm'].find(m=>MediaRecorder.isTypeSupported(m));
+ if(!mime)return toast('This browser cannot record WebM. Use current Chrome or Edge.',true);
+ stopPlayback();state.exporting=true;lockUI(true);$('mp4Btn').textContent='Recording…';$('webmBtn').textContent='Recording…';
+ const oldPosition=state.position;let media=null, audioContext=null, sourceAudio=null, stream=null;
+ try{
+   const duration=totalDuration();const videoStream=canvas.captureStream(30);
+   stream=new MediaStream(videoStream.getVideoTracks());
+   if(state.audioUrl){
+     sourceAudio=new Audio(state.audioUrl);sourceAudio.preload='auto';
+     await new Promise((resolve,reject)=>{sourceAudio.oncanplay=resolve;sourceAudio.onerror=()=>reject(new Error('Unable to load narration.'));sourceAudio.load();});
+     audioContext=new (window.AudioContext||window.webkitAudioContext)();const destination=audioContext.createMediaStreamDestination();
+     const source=audioContext.createMediaElementSource(sourceAudio);source.connect(destination);source.connect(audioContext.destination);
+     for(const track of destination.stream.getAudioTracks())stream.addTrack(track);
+     await audioContext.resume();
+   }
+   const chunks=[];media=new MediaRecorder(stream,{mimeType:mime,videoBitsPerSecond:2500000});
+   const finished=new Promise((resolve,reject)=>{media.ondataavailable=e=>{if(e.data&&e.data.size)chunks.push(e.data);};media.onerror=e=>reject(new Error('Video encoder failed: '+(e.error?.message||'Unknown error')));media.onstop=()=>resolve(new Blob(chunks,{type:mime}));});
+   drawAt(0,false);media.start(300);
+   if(sourceAudio)await sourceAudio.play();
+   const began=performance.now();
+   await new Promise(resolve=>{
+     const tick=now=>{const t=clamp((now-began)/1000,0,duration);drawAt(t,false);
+       setExportProgress(duration?t/duration:1,`Recording scene ${locateTime(t).index+1} of ${state.scenes.length} · ${formatted(t)} / ${formatted(duration)}`);
+       if(t>=duration){resolve();return;}requestAnimationFrame(tick);
+     };requestAnimationFrame(tick);
+   });
+   if(media.state!=='inactive')media.stop();const blob=await finished;
+   if(blob.size<1000)throw new Error('The browser produced an empty video.');
+   if(format==='webm'){download(blob,'whiteboard-animation.webm');toast('WebM video saved.');}
+   else{
+     setExportProgress(.98,'Converting to MP4 using local FFmpeg…');
+     const r=await fetch('/api/convert',{method:'POST',headers:{'Content-Type':'video/webm'},body:blob});
+     if(!r.ok){let m='MP4 conversion failed';try{m=(await r.json()).error||m;}catch{}throw new Error(m);}
+     const mp4=await r.blob();download(mp4,'whiteboard-animation.mp4');toast('MP4 video saved.');
+   }
+   setExportProgress(1,'Your video has been downloaded.');
+ }catch(e){toast(e.message||'Export failed',true);setExportProgress(0,'Export failed. You can try again.');}
+ finally{
+   if(sourceAudio){sourceAudio.pause();sourceAudio.src='';}
+   if(media&&media.state!=='inactive')try{media.stop();}catch{}
+   if(stream)stream.getTracks().forEach(t=>t.stop());if(audioContext)try{await audioContext.close();}catch{}
+   state.exporting=false;lockUI(false);$('mp4Btn').innerHTML='↓ Export MP4 <span class="btn-arrow">→</span>';$('webmBtn').textContent='Export WebM';setPosition(oldPosition);
+ }
+}
+function saveProject(){const obj={format:'whiteboard-studio-project',version:1,saved:new Date().toISOString(),essay:$('essay').value,scenes:state.scenes};download(new Blob([JSON.stringify(obj,null,2)],{type:'application/json'}),'whiteboard-project.json');toast('Project saved as JSON. Import narration separately next time.');}
+async function openProject(file){try{const obj=JSON.parse(await file.text());if(obj.format!=='whiteboard-studio-project'||!Array.isArray(obj.scenes)||typeof obj.essay!=='string')throw new Error('This is not a valid Whiteboard Studio project.');
+   if(obj.scenes.length>60||obj.essay.length>45000)throw new Error('Project is too large.');
+   stopPlayback();removeAudio();$('essay').value=obj.essay;updateDraft();state.scenes=obj.scenes.map(normalizedScene);state.selected=0;setPosition(Math.min(currentTimings()[0]*.6,7));renderScenes();scheduleSave();toast('Project opened.');
+ }catch(e){toast(e.message,true);}}
+function attachEvents(){
+ $('essay').addEventListener('input',updateDraft);
+ $('instantBtn').addEventListener('click',()=>setMode('instant'));
+ $('aiBtn').addEventListener('click',()=>setMode('ai'));
+ $('refreshModelsBtn').addEventListener('click',findModels);
+ $('generateBtn').addEventListener('click',createScenes);
+ $('playBtn').addEventListener('click',togglePlayback);
+ $('restartBtn').addEventListener('click',()=>{stopPlayback();setPosition(0);});
+ $('scrubber').addEventListener('input',e=>{const was=state.playing;stopPlayback();setPosition(totalDuration()*Number(e.target.value)/1000);if(was)togglePlayback();});
+ $('addSceneBtn').addEventListener('click',()=>{stopPlayback();const i=state.scenes.length?state.selected+1:0;state.scenes.splice(i,0,{title:'A new idea',caption:'Explain your next point…',icon:'lightbulb',body:'',duration:6});state.selected=i;setPosition(timeForScene(i)+Math.min(3,currentTimings()[i]*.5));renderScenes();scheduleSave();});
+ $('moveLeftBtn').addEventListener('click',()=>moveScene(-1));$('moveRightBtn').addEventListener('click',()=>moveScene(1));
+ $('deleteSceneBtn').addEventListener('click',()=>{if(!state.scenes.length)return;stopPlayback();state.scenes.splice(state.selected,1);state.selected=Math.max(0,Math.min(state.selected,state.scenes.length-1));setPosition(timeForScene(state.selected));renderScenes();scheduleSave();});
+ const inputs=[['sceneTitleInput','title'],['sceneCaptionInput','caption'],['iconSelect','icon'],['durationInput','duration'],['sceneBodyInput','body']];
+ for(const [id,key] of inputs){$(id).addEventListener((id==='iconSelect'||id==='durationInput')?'change':'input',e=>{const s=state.scenes[state.selected];if(!s)return;s[key]=key==='duration'?clamp(Number(e.target.value)||2,2,90):e.target.value;const pos=state.position;renderScenes();setPosition(Math.min(pos,totalDuration()),false);if(id!=='iconSelect'){const field=$(id);field.focus();if(field.type!=='number' && typeof field.setSelectionRange==='function'){try{field.setSelectionRange(e.target.selectionStart||0,e.target.selectionEnd||0);}catch{}}}scheduleSave();});}
+ $('saveProjectBtn').addEventListener('click',saveProject);$('openProjectBtn').addEventListener('click',()=>$('openProjectInput').click());
+ $('openProjectInput').addEventListener('change',async e=>{if(e.target.files[0])await openProject(e.target.files[0]);e.target.value='';});
+ $('makeVoiceBtn').addEventListener('click',generateVoice);
+ $('audioFileInput').addEventListener('change',async e=>{const file=e.target.files[0];if(file)try{await setAudio(file);toast('Narration imported.');}catch(err){toast(err.message,true);}e.target.value='';});
+ $('removeAudioBtn').addEventListener('click',removeAudio);
+ $('voiceRate').addEventListener('input',e=>{$('voiceRateValue').textContent=({'-4':'Slowest','-3':'Slower','-2':'Slow','-1':'Relaxed','0':'Normal','1':'Brisk','2':'Fast','3':'Faster','4':'Fastest'})[e.target.value]||'Normal';});
+ $('mp4Btn').addEventListener('click',()=>exportVideo('mp4'));
+ $('webmBtn').addEventListener('click',()=>exportVideo('webm'));
+ document.addEventListener('keydown',e=>{if(e.code==='Space'&&!['INPUT','TEXTAREA','SELECT','BUTTON'].includes(document.activeElement.tagName)){e.preventDefault();togglePlayback();}});
+}
+function moveScene(by){const i=state.selected,j=i+by;if(j<0||j>=state.scenes.length)return;stopPlayback();[state.scenes[i],state.scenes[j]]=[state.scenes[j],state.scenes[i]];state.selected=j;setPosition(timeForScene(j));renderScenes();scheduleSave();}
+function setMode(mode){state.mode=mode;$('instantBtn').classList.toggle('active',mode==='instant');$('aiBtn').classList.toggle('active',mode==='ai');$('aiOptions').classList.toggle('hidden',mode!=='ai');if(mode==='ai'&&!$('modelSelect').value)findModels();}
+async function init(){
+ $('iconSelect').innerHTML=iconNames.map(x=>`<option value="${x}">${nameCase(x)}</option>`).join('');attachEvents();
+ try{const saved=JSON.parse(localStorage.getItem('whiteboard-studio-draft')||'null');if(saved && typeof saved.essay==='string' && Array.isArray(saved.scenes)){$('essay').value=saved.essay;state.scenes=saved.scenes.slice(0,60).map(normalizedScene);state.selected=clamp(Number(saved.selected)||0,0,Math.max(0,state.scenes.length-1));}}
+ catch{}
+ updateDraft();renderScenes();drawAt(0);updatePlayerUI();
+ try{const r=await fetch('/api/status');const s=await r.json();state.ffmpeg=!!s.ffmpeg;state.windowsTTS=!!s.windowsTTS;$('ffmpegStatus').textContent=state.ffmpeg?'MP4 / WebM':'WebM (MP4 needs FFmpeg)';if(!state.windowsTTS){$('makeVoiceBtn').disabled=true;$('makeVoiceBtn').title='Offline voice generation is available on Windows';}}
+ catch{$('ffmpegStatus').textContent='WebM available';}
+}
+init();
+})();
