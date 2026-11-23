@@ -1,0 +1,13 @@
+node_modules/
+.env
+.env.*
+!.env.example
+*.log
+*.mp4
+*.webm
+*.wav
+*.mp3
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
