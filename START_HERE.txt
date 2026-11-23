@@ -1,0 +1,24 @@
+WHITEBOARD STUDIO — Essay to hand-drawn video
+=============================================
+
+WINDOWS: Double-click start.bat.
+The app opens at http://localhost:4178
+
+1. Paste your essay.
+2. Click "Create my storyboard".
+3. Press Play to preview, and edit any scenes you want.
+4. Optional: "Generate Windows voice" or "Import audio".
+5. "Export MP4" or "Export WebM".
+
+MP4 requires free FFmpeg. If the app says FFmpeg is missing,
+double-click install-ffmpeg.bat and restart the app.
+WebM export does not need FFmpeg.
+
+Requires Node.js 18+ (your laptop already has Node installed).
+No npm install. No external API keys. No login.
+Ollama AI storyboard is optional; instant scenes work offline.
+
+Keep the browser tab visible while exporting a video.
+Long videos record in real time.
+
+For help and details, see README.md.
