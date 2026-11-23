@@ -6,6 +6,7 @@ const path = require('node:path');
 const os = require('node:os');
 const {spawn, spawnSync} = require('node:child_process');
 const crypto = require('node:crypto');
+const {validateSvgPaths, pathsToSvg} = require('./svg-drawing');
 
 const HOST = '127.0.0.1';
 const PORT = Number(process.env.PORT || 4178);
@@ -60,6 +61,37 @@ async function handleGenerate(req,res){
   // AI may summarize or rewrite the speech: keep original essay for generated TTS.
   return json(res,200,{scenes:good});
 }
+async function handleSceneDrawing(req,res){
+  const input=await jsonBody(req);
+  const title=String(input.title||'').slice(0,80);
+  const caption=String(input.caption||'').slice(0,220);
+  const sceneText=String(input.body||'').slice(0,900);
+  const model=String(input.model||'').trim();
+  if(!model || model.length>180 || !/^[\w.:/-]+$/.test(model)) return json(res,400,{error:'Choose an installed local Ollama model.'});
+  if(!title && !caption && !sceneText) return json(res,400,{error:'The scene needs text before it can be drawn.'});
+  const prompt=[
+    'You are a skilled whiteboard illustrator. Represent the meaning of the scene with one VERY SIMPLE recognizable black-line sketch.',
+    'Return raw SVG PATH DATA using a 100x100 coordinate grid. Use 3 to 12 paths, each starting with M.',
+    'Use only SVG path commands M, L, H, V, C, Q, Z. No more than 8 commands per path.',
+    'All coordinates should be between 5 and 95. NO words, letters, colors, fills, shading, XML, <svg> tags or explanations.',
+    'Return ONLY valid JSON containing one property: "paths".',
+    'Example: {"paths":["M 20 60 L 50 20 L 80 60","M 35 65 Q 50 45 65 65","M 25 80 L 75 80"]}',
+    'Scene title: '+title,
+    'Caption: '+caption,
+    'Essay excerpt: '+sceneText
+  ].join('\n');
+  let result;
+  try{
+    result=await ollamaRequest('/api/generate',{
+      model,prompt,stream:false,format:'json',options:{temperature:0.2,num_predict:2000}
+    },120000);
+  }catch(e){return json(res,502,{error:'Local Ollama drawing request failed: '+e.message});}
+  try{
+    const response=extractJSON(result.response||'');
+    const paths=validateSvgPaths(response);
+    return json(res,200,{paths,svg:pathsToSvg(paths)});
+  }catch(e){return json(res,422,{error:'AI returned an invalid drawing. Original icon kept. '+e.message});}
+}
 async function handleTTS(req,res){
   const {text,rate}=await jsonBody(req);
   if(typeof text!=='string'||text.length<1||text.length>45000) return json(res,400,{error:'Narration text must be 1–45,000 characters.'});
@@ -95,12 +127,13 @@ async function handleConvert(req,res){
 const server=http.createServer(async(req,res)=>{
   try {
     const url=new URL(req.url,'http://'+HOST+':'+PORT);
-    if(req.method==='GET'&&url.pathname==='/api/status') return json(res,200,{ffmpeg:ffmpegOK,windowsTTS:process.platform==='win32',ollama:false,version:'0.1.0'});
+    if(req.method==='GET'&&url.pathname==='/api/status') return json(res,200,{ffmpeg:ffmpegOK,windowsTTS:process.platform==='win32',ollama:false,version:'0.2.0'});
     if(req.method==='GET'&&url.pathname==='/api/ollama-models') {
       try { const result=await ollamaRequest('/api/tags',null,3000);return json(res,200,{models:(result.models||[]).map(m=>m.name)});}
       catch{return json(res,200,{models:[],offline:true});}
     }
     if(req.method==='POST'&&url.pathname==='/api/ollama-plan')return await handleGenerate(req,res);
+    if(req.method==='POST'&&url.pathname==='/api/generate-scene-svg')return await handleSceneDrawing(req,res);
     if(req.method==='POST'&&url.pathname==='/api/tts')return await handleTTS(req,res);
     if(req.method==='POST'&&url.pathname==='/api/convert')return await handleConvert(req,res);
     if(req.method!=='GET'&&req.method!=='HEAD')return json(res,405,{error:'Method not allowed'});
