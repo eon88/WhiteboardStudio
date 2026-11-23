@@ -73,7 +73,7 @@ const MATCHERS = [
  ['lightbulb',/insight|discover|realiz|solution|invention|innovation/i],
  ['scroll',/prophet|revelation|letter|message|scroll|history/i]
 ];
-const state={scenes:[],essay:'',selected:0,position:0,playing:false,raf:null,startTime:0,mode:'instant',audioUrl:null,audioBlob:null,audioDuration:null,audioPreview:null,busy:false,ffmpeg:false,windowsTTS:false,exporting:false};
+const state={scenes:[],essay:'',selected:0,position:0,playing:false,raf:null,startTime:0,mode:'instant',audioUrl:null,audioBlob:null,audioDuration:null,audioPreview:null,busy:false,ffmpeg:false,windowsTTS:false,exporting:false,drawAbort:null};
 let toastTimer=null, saveTimer=null;
 function toast(msg,error=false){const el=$('toast');el.textContent=msg;el.className='toast visible'+(error?' error':'');clearTimeout(toastTimer);toastTimer=setTimeout(()=>el.className='toast',5200);}
 function wordCount(s){return (String(s||'').match(/\S+/g)||[]).length;}
@@ -104,7 +104,13 @@ function instantScenes(text){
     return {title:makeTitle(first),caption:clipString(first,116),body,icon:chooseIcon(body.slice(0,250)),duration:clamp(Math.round((wordCount(body)/2.4)*2)/2,4.5,65)};
   });
 }
-function normalizedScene(s){return {title:String(s.title||'New idea').slice(0,80),caption:String(s.caption||'').slice(0,220),body:String(s.body||'').slice(0,2000),icon:iconNames.includes(s.icon)?s.icon:'lightbulb',duration:clamp(Number(s.duration)||7,2,90)};}
+function safeDrawingPaths(input){
+ if(!Array.isArray(input)||input.length<2||input.length>16)return null;
+ const re=/^[\d\s,.+\-MLHVCQZmlhvcqz]+$/;
+ if(!input.every(d=>typeof d==='string'&&d.length>=4&&d.length<=1000&&re.test(d)&&/^[Mm]/.test(d.trim())&&!(d.match(/[-+]?(?:\d+(?:\.\d*)?|\.\d+)/g)||[]).some(n=>!Number.isFinite(Number(n))||Math.abs(Number(n))>150)))return null;
+ return input.map(d=>d.trim());
+}
+function normalizedScene(s){return {title:String(s.title||'New idea').slice(0,80),caption:String(s.caption||'').slice(0,220),body:String(s.body||'').slice(0,2000),icon:iconNames.includes(s.icon)?s.icon:'lightbulb',duration:clamp(Number(s.duration)||7,2,90),drawingPaths:safeDrawingPaths(s.drawingPaths)};}
 function currentTimings(){
   if(!state.scenes.length)return [];
   if(state.audioDuration && Number.isFinite(state.audioDuration)){
@@ -140,16 +146,20 @@ function updatePlayerUI(){
  const loc=locateTime(state.position);$('sceneBadge').textContent=state.scenes.length?`SCENE ${loc.index+1} / ${state.scenes.length}`:'NO SCENES YET';
 }
 const pointCache=new Map();
-function samplesForIcon(key){if(pointCache.has(key))return pointCache.get(key);
- const paths=ICONS[key]||ICONS.lightbulb;const samples=[];
+function samplesForIcon(key,drawingPaths=null){
+ const paths=drawingPaths||ICONS[key]||ICONS.lightbulb;
+ const cacheKey=drawingPaths?'ai:'+paths.join('|'):key;
+ if(pointCache.has(cacheKey))return pointCache.get(cacheKey);
+ const samples=[];
  for(const d of paths){try{const el=document.createElementNS(svgNS,'path');el.setAttribute('d',d);$('svgMeasure').appendChild(el);
    const len=el.getTotalLength();let pts=[];const steps=Math.max(3,Math.ceil(len/1.4));for(let i=0;i<=steps;i++){let p=el.getPointAtLength(len*i/steps);pts.push([p.x,p.y]);}
    el.remove();samples.push({points:pts,length:len});}catch(e){console.warn('Invalid icon path',key,e);}}
- pointCache.set(key,samples);return samples;
+ if(pointCache.size>200)pointCache.clear();
+ pointCache.set(cacheKey,samples);return samples;
 }
-function iconSVG(key){const paths=ICONS[key]||ICONS.lightbulb;return `<svg viewBox="0 0 100 100" fill="none" stroke="#262821" stroke-linecap="round" stroke-linejoin="round" stroke-width="2.8" aria-hidden="true">${paths.map(d=>`<path d="${h(d)}"/>`).join('')}</svg>`;}
-function traceIcon(key,x,y,size,progress){
- const strokes=samplesForIcon(key),total=strokes.reduce((a,s)=>a+s.length,0),cut=total*clamp(progress,0,1);let spent=0,tip=null;
+function iconSVG(key,drawingPaths=null){const paths=drawingPaths||ICONS[key]||ICONS.lightbulb;return `<svg viewBox="0 0 100 100" fill="none" stroke="#262821" stroke-linecap="round" stroke-linejoin="round" stroke-width="2.8" aria-hidden="true">${paths.map(d=>`<path d="${h(d)}"/>`).join('')}</svg>`;}
+function traceIcon(key,x,y,size,progress,drawingPaths=null){
+ const strokes=samplesForIcon(key,drawingPaths),total=strokes.reduce((a,s)=>a+s.length,0),cut=total*clamp(progress,0,1);let spent=0,tip=null;
  ctx.save();ctx.translate(x-size/2,y-size/2);ctx.scale(size/100,size/100);ctx.lineJoin='round';ctx.lineCap='round';ctx.strokeStyle='#292a28';ctx.lineWidth=2.35;
  for(const s of strokes){const frac=clamp((cut-spent)/s.length,0,1),idx=Math.round((s.points.length-1)*frac);
    if(idx>0){ctx.beginPath();ctx.moveTo(...s.points[0]);for(let i=1;i<=idx;i++)ctx.lineTo(...s.points[i]);ctx.stroke();tip=s.points[idx];}
@@ -190,7 +200,7 @@ function drawAt(position, showMarker=true){
  captionLines.forEach((line,i)=>ctx.fillText(line,91,captionStart+i*45));
  const animStart=Math.min(.6,d*.1), animStop=Math.max(animStart+.15,d-.28);
  const sketchP=clamp((t-animStart)/(animStop-animStart),0,1);
- let tip=traceIcon(s.icon,900,375,365,sketchP);
+ let tip=traceIcon(s.icon,900,375,365,sketchP,s.drawingPaths);
  if(showMarker && t>animStart&&sketchP<.995&&tip)drawMarker(tip.x,tip.y);
  ctx.fillStyle='#b4b7ad';ctx.font='bold 16px Segoe UI, sans-serif';ctx.fillText('SCENE '+String(loc.index+1).padStart(2,'0'),90,630);
  ctx.textAlign='right';ctx.fillText(String(loc.index+1).padStart(2,'0')+' / '+String(state.scenes.length).padStart(2,'0'),1188,630);ctx.textAlign='left';
@@ -201,7 +211,7 @@ function drawAt(position, showMarker=true){
 function renderScenes(){
  const box=$('sceneStrip'); if(!state.scenes.length){box.innerHTML='<div class="empty-scenes">Your scenes will appear here after you paste an essay and create your storyboard. <span>↗</span></div>';$('editorPanel').classList.add('hidden');$('sceneCount').textContent='0 scenes';return;}
  $('sceneCount').textContent=state.scenes.length+' scene'+(state.scenes.length===1?'':'s');
- box.innerHTML=state.scenes.map((s,i)=>`<button type="button" class="scene-tile${i===state.selected?' selected':''}" data-scene="${i}" aria-label="Edit scene ${i+1}: ${h(s.title)}"><div class="scene-art">${iconSVG(s.icon)}</div><div class="scene-text"><div class="scene-meta"><span>SCENE ${String(i+1).padStart(2,'0')}</span><span>${Math.round(currentTimings()[i]||0)}s</span></div><div class="scene-name">${h(s.title)}</div></div></button>`).join('');
+ box.innerHTML=state.scenes.map((s,i)=>`<button type="button" class="scene-tile${i===state.selected?' selected':''}" data-scene="${i}" aria-label="Edit scene ${i+1}: ${h(s.title)}"><div class="scene-art">${iconSVG(s.icon,s.drawingPaths)}${s.drawingPaths?'<span class="ai-sketch-label">AI SKETCH</span>':''}</div><div class="scene-text"><div class="scene-meta"><span>SCENE ${String(i+1).padStart(2,'0')}</span><span>${Math.round(currentTimings()[i]||0)}s</span></div><div class="scene-name">${h(s.title)}</div></div></button>`).join('');
  box.querySelectorAll('[data-scene]').forEach(b=>b.addEventListener('click',()=>selectScene(Number(b.dataset.scene))));
  fillEditor();
 }
@@ -209,6 +219,7 @@ function selectScene(i){if(!state.scenes.length)return;stopPlayback();state.sele
 function fillEditor(){const s=state.scenes[state.selected];if(!s){$('editorPanel').classList.add('hidden');return;}
  $('editorPanel').classList.remove('hidden');$('editingNumber').textContent=String(state.selected+1).padStart(2,'0');
  $('sceneTitleInput').value=s.title;$('sceneCaptionInput').value=s.caption;$('iconSelect').value=s.icon;$('durationInput').value=s.duration;$('sceneBodyInput').value=s.body;
+ $('useIconBtn').classList.toggle('hidden',!s.drawingPaths);
  $('moveLeftBtn').disabled=state.selected===0;$('moveRightBtn').disabled=state.selected===state.scenes.length-1;
 }
 function scheduleSave(){clearTimeout(saveTimer);saveTimer=setTimeout(()=>{try{localStorage.setItem('whiteboard-studio-draft',JSON.stringify({essay:$('essay').value,scenes:state.scenes,selected:state.selected}));}catch{}},600);}
@@ -223,14 +234,57 @@ async function setAudio(blob){if(state.audioUrl)URL.revokeObjectURL(state.audioU
 }
 function removeAudio(){stopPlayback();if(state.audioUrl)URL.revokeObjectURL(state.audioUrl);state.audioUrl=null;state.audioPreview=null;state.audioDuration=null;state.audioBlob=null;setPosition(0);updateAudioControls();}
 function download(blob,filename){const url=URL.createObjectURL(blob);const a=document.createElement('a');a.href=url;a.download=filename;document.body.appendChild(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(url),10000);}
-function lockUI(busy){state.busy=busy;for(const id of ['generateBtn','mp4Btn','webmBtn','makeVoiceBtn','aiBtn','instantBtn'])$(id).disabled=busy;}
+function lockUI(busy){state.busy=busy;for(const id of ['generateBtn','mp4Btn','webmBtn','makeVoiceBtn','aiBtn','instantBtn','drawAllBtn','regenDrawBtn'])$(id).disabled=busy;}
 async function findModels(){
  try{const r=await fetch('/api/ollama-models');const x=await r.json();const el=$('modelSelect');el.innerHTML='';if(!x.models.length){el.innerHTML='<option value="">Ollama is not running</option>';toast('No local Ollama models found. Use Instant scenes instead.');return;}
  x.models.forEach(model=>{const o=document.createElement('option');o.textContent=model;o.value=model;el.appendChild(o);});toast(x.models.length+' Ollama model'+(x.models.length===1?'':'s')+' available.');
  }catch(e){toast('Could not connect to Ollama: '+e.message,true);}
 }
+async function getDrawingModel(){
+ const preferred=$('modelSelect').value;
+ if(preferred)return preferred;
+ const r=await fetch('/api/ollama-models');if(!r.ok)throw new Error('Cannot read Ollama models.');
+ const list=(await r.json()).models||[];
+ if(!list.length)throw new Error('No Ollama model is running locally. Start Ollama first or use built-in sketches.');
+ return list[0];
+}
+async function drawSceneWithModel(scene,model,signal){
+ const r=await fetch('/api/generate-scene-svg',{
+   method:'POST',headers:{'Content-Type':'application/json'},signal,
+   body:JSON.stringify({model,title:scene.title,caption:scene.caption,body:scene.body})
+ });
+ const answer=await r.json();
+ if(!r.ok)throw new Error(answer.error||'Drawing generation failed.');
+ const paths=safeDrawingPaths(answer.paths);
+ if(!paths)throw new Error('The model returned unsafe paths.');
+ scene.drawingPaths=paths;
+ renderScenes();drawAt(state.position);scheduleSave();
+}
+async function drawAllScenes(single=false){
+ if(state.busy)return;
+ if(!state.scenes.length)return toast('Create your storyboard first.');
+ stopPlayback();let model;
+ try{model=await getDrawingModel();}catch(e){return toast(e.message,true);}
+ state.drawAbort=new AbortController();lockUI(true);
+ $('stopDrawBtn').classList.remove('hidden');
+ const targets=single?[state.scenes[state.selected]]:state.scenes.slice();
+ let completed=0,failed=0,attempted=0;
+ try{
+   for(const scene of targets){
+     if(state.drawAbort.signal.aborted)break;
+     attempted++;
+     $('drawStatus').textContent='Drawing '+attempted+' of '+targets.length+' with '+model+'…';
+     try{await drawSceneWithModel(scene,model,state.drawAbort.signal);completed++;}
+     catch(e){if(e.name==='AbortError')break;failed++;console.warn('Sketch fallback:',e.message);}
+   }
+   const cancelled=state.drawAbort.signal.aborted;
+   $('drawStatus').textContent=cancelled?'Stopped. '+completed+' sketches kept; the rest use library icons.':'Complete: '+completed+' custom sketches, '+failed+' library fallbacks.';
+   toast(cancelled?'Stopped drawing.':'Custom sketches: '+completed+'; fallback icons: '+failed+'.');
+ }finally{state.drawAbort=null;$('stopDrawBtn').classList.add('hidden');lockUI(false);renderScenes();scheduleSave();}
+}
 async function createScenes(){const essay=$('essay').value.trim();if(wordCount(essay)<5)return toast('Paste at least a few sentences to begin.',true);
  if(essay.length>45000)return toast('This first version supports essays up to 45,000 characters.',true);
+ let autoDraw=false;
  stopPlayback();lockUI(true);$('generateBtn').textContent='Generating storyboard…';
  try{
    let scenes;
@@ -242,8 +296,10 @@ async function createScenes(){const essay=$('essay').value.trim();if(wordCount(e
    if(!scenes.length)throw new Error('No scenes were generated');
    state.scenes=scenes.map(normalizedScene);state.selected=0;setPosition(Math.min(currentTimings()[0]*.6,7));renderScenes();scheduleSave();
    toast(`Created ${state.scenes.length} scenes. Choose one to edit, or press Play.`);
+   autoDraw=$('smartDrawToggle').checked;
    $('storyboardSection').scrollIntoView({behavior:'smooth',block:'start'});
  }catch(e){toast(e.message,true);}finally{lockUI(false);$('generateBtn').innerHTML='<span>✳</span> Create my storyboard <span class="btn-arrow">→</span>';}
+ if(autoDraw)await drawAllScenes();
 }
 async function generateVoice(){if(state.busy)return;const essay=$('essay').value.trim();if(!essay)return toast('Paste your essay first.',true);
  if(!state.windowsTTS)return toast('Windows speech synthesis is unavailable here. Import a narration file instead.',true);
@@ -314,6 +370,10 @@ function attachEvents(){
  $('aiBtn').addEventListener('click',()=>setMode('ai'));
  $('refreshModelsBtn').addEventListener('click',findModels);
  $('generateBtn').addEventListener('click',createScenes);
+ $('drawAllBtn').addEventListener('click',()=>drawAllScenes(false));
+ $('regenDrawBtn').addEventListener('click',()=>drawAllScenes(true));
+ $('stopDrawBtn').addEventListener('click',()=>state.drawAbort?.abort());
+ $('useIconBtn').addEventListener('click',()=>{const scene=state.scenes[state.selected];if(!scene)return;scene.drawingPaths=null;renderScenes();drawAt(state.position);scheduleSave();});
  $('playBtn').addEventListener('click',togglePlayback);
  $('restartBtn').addEventListener('click',()=>{stopPlayback();setPosition(0);});
  $('scrubber').addEventListener('input',e=>{const was=state.playing;stopPlayback();setPosition(totalDuration()*Number(e.target.value)/1000);if(was)togglePlayback();});
@@ -321,7 +381,7 @@ function attachEvents(){
  $('moveLeftBtn').addEventListener('click',()=>moveScene(-1));$('moveRightBtn').addEventListener('click',()=>moveScene(1));
  $('deleteSceneBtn').addEventListener('click',()=>{if(!state.scenes.length)return;stopPlayback();state.scenes.splice(state.selected,1);state.selected=Math.max(0,Math.min(state.selected,state.scenes.length-1));setPosition(timeForScene(state.selected));renderScenes();scheduleSave();});
  const inputs=[['sceneTitleInput','title'],['sceneCaptionInput','caption'],['iconSelect','icon'],['durationInput','duration'],['sceneBodyInput','body']];
- for(const [id,key] of inputs){$(id).addEventListener((id==='iconSelect'||id==='durationInput')?'change':'input',e=>{const s=state.scenes[state.selected];if(!s)return;s[key]=key==='duration'?clamp(Number(e.target.value)||2,2,90):e.target.value;const pos=state.position;renderScenes();setPosition(Math.min(pos,totalDuration()),false);if(id!=='iconSelect'){const field=$(id);field.focus();if(field.type!=='number' && typeof field.setSelectionRange==='function'){try{field.setSelectionRange(e.target.selectionStart||0,e.target.selectionEnd||0);}catch{}}}scheduleSave();});}
+ for(const [id,key] of inputs){$(id).addEventListener((id==='iconSelect'||id==='durationInput')?'change':'input',e=>{const s=state.scenes[state.selected];if(!s)return;s[key]=key==='duration'?clamp(Number(e.target.value)||2,2,90):e.target.value;if(key==='icon')s.drawingPaths=null;const pos=state.position;renderScenes();setPosition(Math.min(pos,totalDuration()),false);if(id!=='iconSelect'){const field=$(id);field.focus();if(field.type!=='number' && typeof field.setSelectionRange==='function'){try{field.setSelectionRange(e.target.selectionStart||0,e.target.selectionEnd||0);}catch{}}}scheduleSave();});}
  $('saveProjectBtn').addEventListener('click',saveProject);$('openProjectBtn').addEventListener('click',()=>$('openProjectInput').click());
  $('openProjectInput').addEventListener('change',async e=>{if(e.target.files[0])await openProject(e.target.files[0]);e.target.value='';});
  $('makeVoiceBtn').addEventListener('click',generateVoice);
