@@ -105,3 +105,96 @@ function instantScenes(text){
   });
 }
 function normalizedScene(s){return {title:String(s.title||'New idea').slice(0,80),caption:String(s.caption||'').slice(0,220),body:String(s.body||'').slice(0,2000),icon:iconNames.includes(s.icon)?s.icon:'lightbulb',duration:clamp(Number(s.duration)||7,2,90)};}
+function currentTimings(){
+  if(!state.scenes.length)return [];
+  if(state.audioDuration && Number.isFinite(state.audioDuration)){
+    const weights=state.scenes.map(s=>Math.max(3,wordCount(s.body)||wordCount(s.caption)||5));
+    const total=weights.reduce((a,b)=>a+b,0);
+    return weights.map(w=>state.audioDuration*w/total);
+  }
+  return state.scenes.map(s=>clamp(Number(s.duration)||7,2,90));
+}
+function totalDuration(){return currentTimings().reduce((a,b)=>a+b,0);}
+function locateTime(time){let t=Math.max(0,time),ds=currentTimings();for(let i=0;i<ds.length;i++){if(t<ds[i]||i===ds.length-1)return {index:i,local:Math.min(t,ds[i]),duration:ds[i]};t-=ds[i];}return {index:0,local:0,duration:0};}
+function timeForScene(i){return currentTimings().slice(0,i).reduce((a,b)=>a+b,0);}
+function setPosition(time, audioSeek=true){state.position=clamp(Number(time)||0,0,totalDuration());drawAt(state.position);if(audioSeek && state.audioPreview&&state.audioDuration){try{state.audioPreview.currentTime=clamp(state.position,0,Math.max(0,state.audioDuration-0.01));}catch{}}updatePlayerUI();}
+function stopPlayback(){state.playing=false;cancelAnimationFrame(state.raf);state.raf=null;if(state.audioPreview)state.audioPreview.pause();updatePlayerUI();}
+async function togglePlayback(){
+ if(state.exporting)return;
+ if(!state.scenes.length)return toast('Create some scenes first.');
+ if(state.playing){stopPlayback();return;}
+ if(state.position>=totalDuration()-.05)state.position=0;
+ state.playing=true;state.startTime=performance.now()-state.position*1000;
+ if(state.audioPreview){try{state.audioPreview.currentTime=Math.min(state.position,Math.max(0,(state.audioDuration||0)-.02));await state.audioPreview.play();}catch(e){stopPlayback();return toast('The narration could not play: '+e.message,true);}}
+ function frame(now){if(!state.playing)return;let pos=(now-state.startTime)/1000;if(state.audioPreview && !state.audioPreview.paused && state.audioDuration)pos=state.audioPreview.currentTime;
+   setPosition(pos,false);
+   if(pos>=totalDuration()-.05){stopPlayback();setPosition(totalDuration(),false);return;}
+   state.raf=requestAnimationFrame(frame);
+ }
+ state.raf=requestAnimationFrame(frame);updatePlayerUI();
+}
+function updatePlayerUI(){
+ const dur=totalDuration();$('timeReadout').textContent=formatted(state.position)+' / '+formatted(dur);
+ $('scrubber').value=dur?Math.round(state.position/dur*1000):0;
+ $('playBtn').textContent=state.playing?'❚❚':'▶'; $('playBtn').setAttribute('aria-label',state.playing?'Pause':'Play');
+ const loc=locateTime(state.position);$('sceneBadge').textContent=state.scenes.length?`SCENE ${loc.index+1} / ${state.scenes.length}`:'NO SCENES YET';
+}
+const pointCache=new Map();
+function samplesForIcon(key){if(pointCache.has(key))return pointCache.get(key);
+ const paths=ICONS[key]||ICONS.lightbulb;const samples=[];
+ for(const d of paths){try{const el=document.createElementNS(svgNS,'path');el.setAttribute('d',d);$('svgMeasure').appendChild(el);
+   const len=el.getTotalLength();let pts=[];const steps=Math.max(3,Math.ceil(len/1.4));for(let i=0;i<=steps;i++){let p=el.getPointAtLength(len*i/steps);pts.push([p.x,p.y]);}
+   el.remove();samples.push({points:pts,length:len});}catch(e){console.warn('Invalid icon path',key,e);}}
+ pointCache.set(key,samples);return samples;
+}
+function iconSVG(key){const paths=ICONS[key]||ICONS.lightbulb;return `<svg viewBox="0 0 100 100" fill="none" stroke="#262821" stroke-linecap="round" stroke-linejoin="round" stroke-width="2.8" aria-hidden="true">${paths.map(d=>`<path d="${h(d)}"/>`).join('')}</svg>`;}
+function traceIcon(key,x,y,size,progress){
+ const strokes=samplesForIcon(key),total=strokes.reduce((a,s)=>a+s.length,0),cut=total*clamp(progress,0,1);let spent=0,tip=null;
+ ctx.save();ctx.translate(x-size/2,y-size/2);ctx.scale(size/100,size/100);ctx.lineJoin='round';ctx.lineCap='round';ctx.strokeStyle='#292a28';ctx.lineWidth=2.35;
+ for(const s of strokes){const frac=clamp((cut-spent)/s.length,0,1),idx=Math.round((s.points.length-1)*frac);
+   if(idx>0){ctx.beginPath();ctx.moveTo(...s.points[0]);for(let i=1;i<=idx;i++)ctx.lineTo(...s.points[i]);ctx.stroke();tip=s.points[idx];}
+   spent+=s.length;if(spent>cut)break;
+ }
+ ctx.restore();return tip?{x:x-size/2+tip[0]*size/100,y:y-size/2+tip[1]*size/100}:null;
+}
+function drawMarker(x,y){ctx.save();ctx.translate(x,y);ctx.rotate(-.75);ctx.shadowColor='#0002';ctx.shadowBlur=6;ctx.shadowOffsetY=4;ctx.fillStyle='#f6f0dc';ctx.strokeStyle='#4b4840';ctx.lineWidth=2;ctx.beginPath();ctx.roundRect(-11,-10,22,103,6);ctx.fill();ctx.stroke();ctx.fillStyle='#222';ctx.fillRect(-11,0,22,30);ctx.fillStyle='#272726';ctx.beginPath();ctx.moveTo(-9,-10);ctx.lineTo(0,-31);ctx.lineTo(9,-10);ctx.closePath();ctx.fill();ctx.restore();}
+function drawLine(x1,y1,x2,y2,progress=1){ctx.beginPath();ctx.moveTo(x1,y1);ctx.lineTo(x1+(x2-x1)*progress,y1+(y2-y1)*progress);ctx.stroke();}
+function wrap(s,maxWidth,font,maxLines){ctx.font=font;const tokens=String(s||'').split(/\s+/),lines=[];let line='';for(const word of tokens){const next=line?line+' '+word:word;
+  if(ctx.measureText(next).width>maxWidth && line){lines.push(line);line=word;}else line=next;
+ } if(line)lines.push(line);if(lines.length>maxLines){let last=lines.slice(maxLines-1).join(' ');while(last.length && ctx.measureText(last+'…').width>maxWidth)last=last.slice(0,-1);return [...lines.slice(0,maxLines-1),last+'…'];}return lines;}
+function drawAt(position, showMarker=true){
+ ctx.setTransform(canvas.width/W,0,0,canvas.height/H,0,0);ctx.globalAlpha=1;ctx.fillStyle='#fdfcf8';ctx.fillRect(0,0,W,H);
+ // Paper texture and the visible whiteboard frame.
+ ctx.strokeStyle='#efece5';ctx.lineWidth=2;ctx.strokeRect(30,30,1220,660);
+ ctx.fillStyle='#adafa5';ctx.font='bold 17px Segoe UI, sans-serif';ctx.fillText('WHITEBOARD   /   STORIES IN MOTION',87,81);
+ if(!state.scenes.length){
+   ctx.fillStyle='#252721';ctx.textAlign='center';ctx.font='64px Georgia,serif';ctx.fillText('Your story starts here.',640,322);
+   ctx.fillStyle='#969a91';ctx.font='24px Segoe UI, sans-serif';ctx.fillText('Paste an essay  →  Create scenes  →  Press play',640,376);ctx.textAlign='left';
+   ctx.strokeStyle='#e28c66';ctx.lineWidth=5;drawLine(445,412,835,412);return;
+ }
+ const loc=locateTime(position),s=state.scenes[loc.index],d=Math.max(.1,loc.duration);
+ let t=loc.local;
+ const fade=clamp(t/.35,0,1);
+ ctx.globalAlpha=fade;
+ // Title enters ahead of the sketch.
+ const headline=clipString(s.title,72);
+ ctx.fillStyle='#272824';ctx.font='normal 58px Georgia,serif';
+ const titleLines=wrap(headline,488,'normal 58px Georgia,serif',2);
+ titleLines.forEach((line,i)=>ctx.fillText(line,90,228+i*71));
+ ctx.strokeStyle='#e17955';ctx.lineWidth=6;ctx.lineCap='round';drawLine(90,260+(titleLines.length-1)*71,390,260+(titleLines.length-1)*71,clamp((t-.3)/.8,0,1));
+ ctx.fillStyle='#70746d';ctx.font='24px "Segoe Print", "Comic Sans MS", sans-serif';
+ const captionText=s.caption||s.body||'';
+ const maxChars=Math.ceil(captionText.length*clamp((t-.65)/Math.min(2,d*.36),0,1));
+ const captionLines=wrap(captionText.slice(0,maxChars),480,'24px "Segoe Print", "Comic Sans MS", sans-serif',5);
+ let captionStart=340+(titleLines.length-1)*54;
+ captionLines.forEach((line,i)=>ctx.fillText(line,91,captionStart+i*45));
+ const animStart=Math.min(.6,d*.1), animStop=Math.max(animStart+.15,d-.28);
+ const sketchP=clamp((t-animStart)/(animStop-animStart),0,1);
+ let tip=traceIcon(s.icon,900,375,365,sketchP);
+ if(showMarker && t>animStart&&sketchP<.995&&tip)drawMarker(tip.x,tip.y);
+ ctx.fillStyle='#b4b7ad';ctx.font='bold 16px Segoe UI, sans-serif';ctx.fillText('SCENE '+String(loc.index+1).padStart(2,'0'),90,630);
+ ctx.textAlign='right';ctx.fillText(String(loc.index+1).padStart(2,'0')+' / '+String(state.scenes.length).padStart(2,'0'),1188,630);ctx.textAlign='left';
+ ctx.globalAlpha=1;
+ // Very subtle transition wash between scenes.
+ if(t<.17){ctx.fillStyle=`rgba(253,252,248,${(1-t/.17)*.75})`;ctx.fillRect(33,33,1214,654);}
+}
