@@ -46,3 +46,26 @@ Use "Save project" to download a JSON project, and "Open project" to restore it.
 ## Developer notes
 
 `node server.js` starts the app. All code is plain JavaScript, HTML and CSS; no npm dependencies. Server handles optional Ollama, Windows TTS and FFmpeg conversion.
+
+## v0.2 — AI-drawn whiteboard sketches
+
+Paste an essay and click **Create my storyboard** as before. You now have two drawing choices:
+
+- **Fast library drawings** (default): uses the original built-in symbols, requires no Ollama.
+- **Custom AI sketches**: start Ollama with an installed chat model. Check **Draw new sketches with local AI** before creating scenes, or click **AI draw all scenes** after creating the storyboard. Select a scene and click **Redraw with AI** to try again. **Use library icon** discards the custom sketch.
+
+Sketch generation runs locally, one scene at a time, and can take a while on slower models. Use **Stop drawing** to cancel remaining scenes. Failed or rejected sketches keep their library icons. Generated path data is stored in saved project JSON files, so it can be reopened without rerunning the model.
+
+The model creates a few SVG path strokes in a fixed 100×100 coordinate system. The server checks every command, parameter and coordinate and reconstructs its own minimal black-marker SVG. Raw model-provided XML/HTML is never added to the page. No new npm dependencies or paid API keys.
+
+To update an existing Git clone on Windows:
+
+```powershell
+cd "$env:USERPROFILE\Documents\WhiteboardStudio"
+git pull
+.\start.bat
+```
+
+If Windows says the port is already in use, close the old terminal running the app before starting it again. In PowerShell, use `node -v` to check Node.js (18+).
+
+Run `npm test` for automated validator tests. MP4 export still requires FFmpeg.
